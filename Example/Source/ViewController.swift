@@ -79,9 +79,10 @@ class ViewController: UIViewController {
 
   @IBAction func startVideoRecording() {
     do {
-      let videoRecording = try sceneView.startVideoRecording(
-        size: CGSize(width: 720, height: 1280)
-      )
+      let videoRecording = try sceneView.startVideoRecording(to: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!,
+                                    videoSettings: VideoSettings(fileType: .mp4, size: CGSize(width: 720, height: 1280)),
+                                    audioSettings: AudioSettings(format: kAudioFormatMPEG4AAC, sampleRate: 44_100, numberOfChannels: 2),
+                                    segmentation: true)
 
       // Observe for duration
       videoRecording.$duration.observe { [weak self] duration in

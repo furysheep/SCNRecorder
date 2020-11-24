@@ -26,6 +26,7 @@
 import Foundation
 import SceneKit
 import ARKit
+import Combine
 
 public class BaseRecorder: NSObject {
 
@@ -54,12 +55,14 @@ public class BaseRecorder: NSObject {
   public func makeVideoRecording(
     to url: URL,
     videoSettings: VideoSettings,
-    audioSettings: AudioSettings
+    audioSettings: AudioSettings,
+    subject: PassthroughSubject<Segment, Error>?
   ) throws -> VideoRecording {
     try mediaSession.makeVideoRecording(
       to: url,
       videoSettings: videoSettings,
-      audioSettings: audioSettings
+      audioSettings: audioSettings,
+      subject: subject
     )
   }
 

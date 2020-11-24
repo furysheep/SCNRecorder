@@ -28,6 +28,13 @@ import UIKit
 import AVFoundation
 import SceneKit
 import ARKit
+import Combine
+
+struct FMP4WriterConfiguration {
+  let segmentFileNamePrefix = "media"
+  let indexFileName = "index.m3u8"
+  let segmentDuration = 6
+}
 
 public enum SelfRecordableError: Swift.Error {
   case recorderNotInjected
@@ -70,37 +77,6 @@ public extension SelfRecordable {
     guard recorder == nil else { return }
     injectRecorder()
     assert(recorder != nil)
-
-    fixFirstLaunchFrameDrop()
-  }
-
-  // Time to time, when the first video recording is started
-  // There is a small frame drop for a half of a second.
-  // It happens because the first AVAssetWriter initialization takes longer that continues.
-  // But reusable IOSurfaces are already captured by SCNRecorder and SceneKit can't fastly acquire them.
-  // This is probably a temporary fix until I find a better one.
-  // - Vlad
-  internal func fixFirstLaunchFrameDrop() {
-    let queue = DispatchQueue(label: "SCNRecorder.Temporarty.DispatchQueue")
-    queue.async {
-
-      var videoSettings = VideoSettings()
-      videoSettings.size = CGSize(width: 1024, height: 768)
-
-      let audioSettings = AudioSettings()
-
-      let videoOutput = try? VideoOutput(
-        url: FileManager.default.temporaryDirectory.appendingPathComponent(
-          "\(UUID().uuidString).\(videoSettings.fileType.fileExtension)",
-          isDirectory: false
-        ),
-        videoSettings: videoSettings,
-        audioSettings: audioSettings,
-        queue: queue
-      )
-
-      queue.async { videoOutput?.cancel() }
-    }
   }
 }
 
@@ -114,8 +90,6 @@ public extension SelfRecordable where Self: MetalRecordable {
     guard recorder == nil else { return }
     injectRecorder()
     assert(recorder != nil)
-
-    fixFirstLaunchFrameDrop()
   }
 }
 
@@ -126,9 +100,10 @@ public extension SelfRecordable {
   @discardableResult
   func startVideoRecording(
     fileType: VideoSettings.FileType = .mov,
-    size: CGSize? = nil
+    size: CGSize? = nil,
+    segmentation: Bool = false
   ) throws -> VideoRecording {
-    try startVideoRecording(videoSettings: VideoSettings(fileType: fileType, size: size))
+    try startVideoRecording(videoSettings: VideoSettings(fileType: fileType, size: size), segmentation: segmentation)
   }
 
   func capturePixelBuffers(
@@ -149,15 +124,17 @@ public extension SelfRecordable {
   @discardableResult
   func startVideoRecording(
     videoSettings: VideoSettings,
-    audioSettings: AudioSettings = AudioSettings()
+    audioSettings: AudioSettings = AudioSettings(),
+    segmentation: Bool = false
   ) throws -> VideoRecording {
     return try startVideoRecording(
-      to: FileManager.default.temporaryDirectory.appendingPathComponent(
+        to: FileManager.default.temporaryDirectory.appendingPathComponent(
         "\(UUID().uuidString).\(videoSettings.fileType.fileExtension)",
         isDirectory: false
       ),
       videoSettings: videoSettings,
-      audioSettings: audioSettings
+      audioSettings: audioSettings,
+      segmentation: segmentation
     )
   }
 
@@ -165,15 +142,67 @@ public extension SelfRecordable {
   func startVideoRecording(
     to url: URL,
     videoSettings: VideoSettings,
-    audioSettings: AudioSettings = AudioSettings()
+    audioSettings: AudioSettings = AudioSettings(),
+    segmentation: Bool = false
   ) throws -> VideoRecording {
     guard videoRecording == nil else { throw SelfRecordableError.videoRecordingAlreadyStarted }
 
+    let config = FMP4WriterConfiguration()
+    var segmentGenerator: PassthroughSubject<Segment, Error>?
+
+    let indexFileURL = URL(fileURLWithPath: config.indexFileName, isDirectory: false, relativeTo: url)
+    if segmentation {
+      var segmentAndIndexFileWriter: AnyCancellable?
+
+      segmentGenerator = PassthroughSubject<Segment, Error>()
+
+      // Generate an index file from a stream of Segments.
+      let indexFileGenerator = segmentGenerator!.reduceToIndexFile(using: config)
+
+      // Write each segment to disk.
+      let segmentFileWriter = segmentGenerator!
+          .tryMap { segment in
+              let segmentFileName = segment.fileName(forPrefix: config.segmentFileNamePrefix)
+              let segmentFileURL = URL(fileURLWithPath: segmentFileName, isDirectory: false, relativeTo: url)
+
+              print("writing \(segment.data.count) bytes to \(segmentFileName)")
+              try segment.data.write(to: segmentFileURL)
+          }
+
+      // Write the index file to disk.
+      let indexFileWriter = indexFileGenerator
+          .tryMap { finalIndexFile in
+
+              print("writing index file to \(config.indexFileName)")
+              try finalIndexFile.write(to: indexFileURL, atomically: false, encoding: .utf8)
+          }
+
+      // Collect the results of segment and index file writing.
+      segmentAndIndexFileWriter = segmentFileWriter.merge(with: indexFileWriter)
+          .sink(receiveCompletion: { completion in
+              // Evaluate the result.
+              switch completion {
+              case .finished:
+                  assert(segmentAndIndexFileWriter != nil)
+                  print("Finished writing segment data")
+              case .failure(let error):
+                  switch error {
+                  case let localizedError as LocalizedError:
+                      print("Error: \(localizedError.errorDescription ?? String(describing: localizedError))")
+                  default:
+                      print("Error: \(error)")
+                  }
+              }
+          }, receiveValue: {})
+    }
+    
     let videoRecording = try assertedRecorder().makeVideoRecording(
       to: url,
       videoSettings: videoSettings,
-      audioSettings: audioSettings
+      audioSettings: audioSettings,
+      subject: segmentGenerator
     )
+    videoRecording.url = segmentGenerator != nil ? indexFileURL : url
     videoRecording.resume()
 
     self.videoRecording = videoRecording

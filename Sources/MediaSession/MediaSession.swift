@@ -25,6 +25,7 @@
 
 import Foundation
 import AVFoundation
+import Combine
 
 final class MediaSession {
 
@@ -126,7 +127,8 @@ extension MediaSession {
   func makeVideoRecording(
     to url: URL,
     videoSettings: VideoSettings = VideoSettings(),
-    audioSettings: AudioSettings = AudioSettings()
+    audioSettings: AudioSettings = AudioSettings(),
+    subject: S?
   ) throws -> VideoRecording {
     guard let videoInput = videoInput else { throw NSError() }
 
@@ -138,7 +140,8 @@ extension MediaSession {
       url: url,
       videoSettings: videoSettings,
       audioSettings: audioSettings,
-      queue: queue
+      queue: queue,
+      subject: subject
     )
 
     videoOutput.onFinalState = { [weak self] in

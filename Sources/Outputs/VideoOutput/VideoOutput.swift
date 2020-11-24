@@ -25,8 +25,18 @@
 
 import Foundation
 import AVFoundation
+import Combine
 
-final class VideoOutput {
+public struct Segment {
+    let index: Int
+    let data: Data
+    let isInitializationSegment: Bool
+    let report: AVAssetSegmentReport?
+}
+
+typealias S = PassthroughSubject<Segment, Error>
+
+final class VideoOutput: NSObject, AVAssetWriterDelegate {
 
   var assetWriter: AVAssetWriter!
 
@@ -55,20 +65,32 @@ final class VideoOutput {
 
   weak var videoRecording: VideoRecording?
 
+  private let subject: S?
+  
+  private var segmentIndex = 0
+    
   init(
     url: URL,
     videoSettings: VideoSettings,
     audioSettings: AudioSettings,
-    queue: DispatchQueue
+    queue: DispatchQueue,
+    subject: S?
   ) throws {
     self.queue = queue
     self.state = .starting
+    self.subject = subject
+    
+    super.init()
 
     queue.async { [weak self] in
       guard let this = self else { return }
 
       do {
-        this.assetWriter = try AVAssetWriter(url: url, fileType: videoSettings.fileType.avFileType)
+        if subject != nil {
+          this.assetWriter = AVAssetWriter(contentType: UTType(videoSettings.fileType.avFileType.rawValue)!)
+        } else {
+          this.assetWriter = try AVAssetWriter(url: url, fileType: videoSettings.fileType.avFileType)
+        }
 
         this.videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings.outputSettings)
         this.videoInput.expectsMediaDataInRealTime = true
@@ -88,6 +110,13 @@ final class VideoOutput {
 
         this.pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: this.videoInput)
 
+        if subject != nil {
+          this.assetWriter.outputFileTypeProfile = .mpeg4AppleHLS
+          this.assetWriter.preferredOutputSegmentInterval = CMTime(seconds: 1, preferredTimescale: 1)
+          this.assetWriter.initialSegmentStartTime = CMTime(value: 10, timescale: 1)
+          this.assetWriter.delegate = self
+        }
+        
         guard this.assetWriter.startWriting() else {
           throw this.assetWriter.error ?? Error.cantStartWriting
         }
@@ -109,6 +138,29 @@ final class VideoOutput {
     self.videoRecording = videoRecording
     return videoRecording
   }
+  
+  // MARK: AVAssetWriterDelegate -
+  // @objc protocol should be inside the class
+  func assetWriter(_ writer: AVAssetWriter,
+                   didOutputSegmentData segmentData: Data,
+                   segmentType: AVAssetSegmentType,
+                   segmentReport: AVAssetSegmentReport?) {
+      let isInitializationSegment: Bool
+
+      switch segmentType {
+      case .initialization:
+          isInitializationSegment = true
+      case .separable:
+          isInitializationSegment = false
+      @unknown default:
+          print("Skipping segment with unrecognized type \(segmentType)")
+          return
+      }
+
+      let segment = Segment(index: segmentIndex, data: segmentData, isInitializationSegment: isInitializationSegment, report: segmentReport)
+      subject!.send(segment)
+      segmentIndex += 1
+  }
 }
 
 extension VideoOutput {
@@ -123,7 +175,10 @@ extension VideoOutput {
   }
 
   func finishWriting(completionHandler handler: @escaping () -> Void) {
-    assetWriter.finishWriting(completionHandler: handler)
+    assetWriter.finishWriting {[weak self] in
+      self?.subject!.send(completion: .finished)
+      handler()
+    }
   }
 
   func cancelWriting() {
@@ -175,8 +230,6 @@ extension VideoOutput {
 
 // - MARK: Getters
 extension VideoOutput {
-
-  var url: URL { assetWriter.outputURL }
 
   var fileType: AVFileType { assetWriter.outputFileType }
 }

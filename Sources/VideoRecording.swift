@@ -34,7 +34,7 @@ public final class VideoRecording {
 
     let videoOutput: VideoOutput
 
-    public var url: URL { videoOutput.url }
+    public var url: URL!
 
     public var fileType: AVFileType { videoOutput.fileType }
 
